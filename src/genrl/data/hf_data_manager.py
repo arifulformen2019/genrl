@@ -20,18 +20,12 @@ class _TokenizedTextDataset(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         for example in self.dataset:
-            # This is where each piece of text gets turned into numbers (tokens)
             yield self.tokenizer(example[self.name])
 
 
 class SerialHuggingFaceDataManager(TokenizedDataManager):
     """
     DataManager for loading and processing datasets from the Hugging Face Hub.
-    
-    OPTIMIZATION NOTE:
-    This class is now optimized to automatically use the correct number of
-    parallel processes for data loading based on the CPU it's running on.
-    This prevents data pipeline bottlenecks and training stalls.
     """
 
     def __init__(
@@ -41,23 +35,11 @@ class SerialHuggingFaceDataManager(TokenizedDataManager):
         batch_size: int,
         text_field_name: str = "text",
         access_token: str | None = None,
-        # OPTIMIZATION: Set to `None` to enable auto-detection.
-        # The code will automatically use the number of available CPU cores.
         num_workers: int | None = None,
         tokenizer_kwargs: dict[str, Any] | None = None,
     ):
         """
         Initializes the DataManager.
-
-        Args:
-            path_or_name: Path or name of the dataset on the Hugging Face Hub.
-            tokenizer_path_or_name: Path or name of the tokenizer.
-            batch_size: The size of each data batch.
-            text_field_name: The name of the column in the dataset containing the text.
-            access_token: Hugging Face API token, if needed for private models.
-            num_workers: Number of parallel processes for data loading. 
-                         If None, it automatically uses all available CPU cores.
-            tokenizer_kwargs: Additional arguments for the tokenizer.
         """
         self.path_or_name = path_or_name
         self.tokenizer_path_or_name = tokenizer_path_or_name
@@ -67,16 +49,20 @@ class SerialHuggingFaceDataManager(TokenizedDataManager):
         self.tokenizer_kwargs = tokenizer_kwargs
         self._train_iterator = None
 
-        # OPTIMIZATION: Automatically detect and set the number of workers
-        # if the user doesn't specify one. This makes the code efficient
-        # on any machine without hardcoding assumptions.
-        if num_workers is None:
-            # os.cpu_count() can sometimes return None, so we fall back to 1.
-            self.num_workers = os.cpu_count() or 1
-        else:
-            self.num_workers = num_workers
-        
-        print(f"INFO: Using {self.num_workers} parallel workers for data loading.")
+        # ======================================================================
+        # DEBUGGING STEP 1: Forcing num_workers to 0
+        # ----------------------------------------------------------------------
+        # This change disables parallel data loading to test if the stall is
+        # caused by a multiprocessing deadlock.
+        #
+        # - If the script RUNS after this change (even if slow), the problem is
+        #   the data loader.
+        # - If the script STILL STALLS, the problem is elsewhere.
+        # ======================================================================
+        self.num_workers = 0
+        print("="*80)
+        print("DEBUGGING: Forcing `num_workers = 0` to check for data loader deadlocks.")
+        print("="*80)
 
 
     def initialize(self):
