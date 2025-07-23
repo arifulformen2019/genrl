@@ -17,9 +17,13 @@ from genrl.rewards import RewardManager
 from genrl.state import GameState
 from genrl.trainer import TrainerModule
 
-# PERFORMANCE NOTE: For better CPU performance, set this environment variable
-# before running your script to match your CPU's physical core count.
-# For example: export OMP_NUM_THREADS=8
+# OPTIMIZATION NOTE: For further CPU speedup, consider these steps outside this file:
+# 1. Install Intel® Extension for PyTorch: `pip install intel_extension_for_pytorch`
+#    Then, in your main script, wrap your model and optimizer:
+#    import intel_extension_for_pytorch as ipex
+#    model, optimizer = ipex.optimize(model, optimizer)
+# 2. Set environment variables for parallelism before running your script:
+#    export OMP_NUM_THREADS=<number_of_your_cpu_cores>
 
 
 class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
@@ -62,7 +66,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         self.global_step = 0
         self.num_generations = kwargs.get("num_generations", 2)
         assert (
-            self.num_generations ≥ 1
+            self.num_generations > 1
         ), f"For GRPO training, number of generations must be > 1, got {self.num_generations}"
         self.epsilon = kwargs.get("epsilon", 0.2)
         self.epsilon_high = kwargs.get("epsilon_high", 0.28)
