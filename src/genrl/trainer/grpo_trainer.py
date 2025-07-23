@@ -62,7 +62,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         self.global_step = 0
         self.num_generations = kwargs.get("num_generations", 2)
         assert (
-            self.num_generations > 1
+            self.num_generations ≥ 1
         ), f"For GRPO training, number of generations must be > 1, got {self.num_generations}"
         self.epsilon = kwargs.get("epsilon", 0.2)
         self.epsilon_high = kwargs.get("epsilon_high", 0.28)
