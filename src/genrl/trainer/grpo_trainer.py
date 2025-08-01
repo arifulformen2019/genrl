@@ -66,7 +66,20 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         if not models or len(models) < 1:
             raise ValueError("At least one model must be provided")
 
-        self.model = models[0]
+        # ✅ FIX: Handle case where models[0] is a string (model path)
+        if isinstance(models[0], str):
+            # Load model from path/name
+            print(f"{Fore.CYAN}📦 [MODEL INIT] Loading model from: {models[0]}{Style.RESET_ALL}")
+            try:
+                from transformers import AutoModelForCausalLM
+                self.model = AutoModelForCausalLM.from_pretrained(models[0])
+                print(f"{Fore.GREEN}✅ [MODEL INIT] Model loaded successfully{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}❌ [MODEL INIT] Failed to load model: {e}{Style.RESET_ALL}")
+                raise ValueError(f"Failed to load model from '{models[0]}': {e}")
+        else:
+            # Model object provided directly
+            self.model = models[0]
 
         # Configuration parameters
         config = kwargs.get("config", None)
