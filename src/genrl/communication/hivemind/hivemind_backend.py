@@ -248,14 +248,28 @@ class HivemindBackend(Communication):
     def _initialize_bootstrap_dht(self, initial_peers, **kwargs):
         """Initialize DHT as bootstrap node with error handling"""
         try:
-            # ✅ MEMORY OPTIMIZATION: Set conservative DHT parameters
+            # ✅ MEMORY OPTIMIZATION: Set conservative DHT parameters (compatible with all HiveMind versions)
             dht_kwargs = {
-                **kwargs,
                 "cache_locally": False,
                 "cache_on_store": False,
-                "max_workers": 4,  # Limit worker threads
-                "max_concurrent_queries": 16,  # Limit concurrent operations
+                # ✅ REMOVE: max_workers and max_concurrent_queries (not supported in older HiveMind)
+                # "max_workers": 4,  # Limit worker threads
+                # "max_concurrent_queries": 16,  # Limit concurrent operations
             }
+            
+            # ✅ ADD: Only include supported kwargs
+            supported_params = [
+                'cache_locally', 'cache_on_store', 'listen', 'announce_maddrs',
+                'use_relay', 'use_auto_relay', 'use_ipfs', 'record_validators',
+                'protocol_version', 'num_replicas', 'wait_timeout', 'cache_size',
+                'expiration', 'replication_factor'
+            ]
+            
+            # Filter kwargs to only include supported parameters
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported_params}
+            dht_kwargs.update(filtered_kwargs)
+            
+            print(f"{Fore.CYAN}🔧 [BOOTSTRAP] DHT kwargs: {list(dht_kwargs.keys())}{Style.RESET_ALL}")
             
             self.dht = DHT(
                 start=True,
@@ -291,14 +305,28 @@ class HivemindBackend(Communication):
                     print(f"{Fore.RED}❌ [WORKER] Failed to get initial peers: {e}{Style.RESET_ALL}")
                     initial_peers = []
             
-            # ✅ MEMORY OPTIMIZATION: Set conservative DHT parameters
+            # ✅ MEMORY OPTIMIZATION: Set conservative DHT parameters (compatible with all HiveMind versions)
             dht_kwargs = {
-                **kwargs,
                 "cache_locally": False,
                 "cache_on_store": False,
-                "max_workers": 4,  # Limit worker threads
-                "max_concurrent_queries": 16,  # Limit concurrent operations
+                # ✅ REMOVE: max_workers and max_concurrent_queries (not supported in older HiveMind)
+                # "max_workers": 4,  # Limit worker threads
+                # "max_concurrent_queries": 16,  # Limit concurrent operations
             }
+            
+            # ✅ ADD: Only include supported kwargs
+            supported_params = [
+                'cache_locally', 'cache_on_store', 'listen', 'announce_maddrs',
+                'use_relay', 'use_auto_relay', 'use_ipfs', 'record_validators',
+                'protocol_version', 'num_replicas', 'wait_timeout', 'cache_size',
+                'expiration', 'replication_factor'
+            ]
+            
+            # Filter kwargs to only include supported parameters
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported_params}
+            dht_kwargs.update(filtered_kwargs)
+            
+            print(f"{Fore.CYAN}🔧 [WORKER] DHT kwargs: {list(dht_kwargs.keys())}{Style.RESET_ALL}")
             
             self.dht = DHT(
                 start=True,
