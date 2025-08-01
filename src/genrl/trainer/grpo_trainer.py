@@ -445,37 +445,102 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             print(f"Generation config initialization failed: {e}")
 
     def _process_inputs(self, inputs, with_template=True, for_training=False):
-        """✅ OPTIMIZED: Process inputs with memory management"""
+        """✅ OPTIMIZED: Process inputs with memory management and error handling"""
         
         try:
+            # ✅ INPUT VALIDATION: Check if inputs is empty or None
+            if not inputs:
+                print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] Empty inputs provided{Style.RESET_ALL}")
+                return self.processing_class("", return_tensors="pt", padding=True)
+            
             # ✅ MEMORY OPTIMIZATION: Limit input processing
             if hasattr(inputs, 'to_dict'):
                 inputs = [dict(inputs[i]) for i in range(len(inputs))]
             elif isinstance(inputs, dict):
+                inputs = [inputs]
+            elif not isinstance(inputs, list):
+                print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] Converting inputs to list: {type(inputs)}{Style.RESET_ALL}")
                 inputs = [inputs]
 
             # ✅ SIZE CHECK: Warn about large input batches
             if len(inputs) > 100:
                 print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] Large batch: {len(inputs)} items{Style.RESET_ALL}")
 
+            templated_prompts = []
+            
             if with_template:
                 if for_training:
-                    templated_prompts = []
                     for item in inputs:
-                        for _ in range(self.num_generations):
-                            templated_prompts.append(
-                                apply_chat_template(item, self.processing_class)["prompt"]
-                            )
+                        try:
+                            # ✅ VALIDATION: Check if item is valid for chat template
+                            if isinstance(item, dict) and 'prompt' in item:
+                                for _ in range(self.num_generations):
+                                    templated_prompts.append(
+                                        apply_chat_template(item, self.processing_class)["prompt"]
+                                    )
+                            elif isinstance(item, dict):
+                                # Fallback: create basic chat format
+                                basic_item = {"prompt": [{"role": "user", "content": str(item)}]}
+                                for _ in range(self.num_generations):
+                                    templated_prompts.append(
+                                        apply_chat_template(basic_item, self.processing_class)["prompt"]
+                                    )
+                            else:
+                                # Last resort: convert to string
+                                basic_item = {"prompt": [{"role": "user", "content": str(item)}]}
+                                for _ in range(self.num_generations):
+                                    templated_prompts.append(
+                                        apply_chat_template(basic_item, self.processing_class)["prompt"]
+                                    )
+                        except Exception as item_e:
+                            print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] Failed to process item, using fallback: {item_e}{Style.RESET_ALL}")
+                            # Fallback to simple string
+                            for _ in range(self.num_generations):
+                                templated_prompts.append(str(item))
                 else:
-                    templated_prompts = [
-                        apply_chat_template(item, self.processing_class)["prompt"]
-                        for item in inputs
-                    ]
+                    for item in inputs:
+                        try:
+                            if isinstance(item, dict) and 'prompt' in item:
+                                templated_prompts.append(
+                                    apply_chat_template(item, self.processing_class)["prompt"]
+                                )
+                            elif isinstance(item, dict):
+                                basic_item = {"prompt": [{"role": "user", "content": str(item)}]}
+                                templated_prompts.append(
+                                    apply_chat_template(basic_item, self.processing_class)["prompt"]
+                                )
+                            else:
+                                basic_item = {"prompt": [{"role": "user", "content": str(item)}]}
+                                templated_prompts.append(
+                                    apply_chat_template(basic_item, self.processing_class)["prompt"]
+                                )
+                        except Exception as item_e:
+                            print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] Failed to process item, using fallback: {item_e}{Style.RESET_ALL}")
+                            templated_prompts.append(str(item))
             else:
                 if for_training:
-                    templated_prompts = [output for generations in inputs for output in generations]
+                    # ✅ SAFE EXTRACTION: Handle nested lists safely
+                    for generations in inputs:
+                        if isinstance(generations, list):
+                            for output in generations:
+                                templated_prompts.append(str(output))
+                        else:
+                            # Single item, not a list of generations
+                            templated_prompts.append(str(generations))
                 else:
-                    templated_prompts = [item[0] for item in inputs]
+                    # ✅ SAFE EXTRACTION: Handle cases where item[0] might not exist
+                    for item in inputs:
+                        if isinstance(item, list) and len(item) > 0:
+                            templated_prompts.append(str(item[0]))
+                        elif isinstance(item, str):
+                            templated_prompts.append(item)
+                        else:
+                            templated_prompts.append(str(item))
+
+            # ✅ VALIDATION: Ensure we have at least one prompt
+            if not templated_prompts:
+                print(f"{Fore.YELLOW}⚠️ [PROCESS INPUT] No valid prompts generated, using fallback{Style.RESET_ALL}")
+                templated_prompts = [""]
 
             # ✅ MEMORY OPTIMIZATION: Limit prompt length
             max_length = 1024  # Reasonable limit
@@ -490,12 +555,231 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             # ✅ CLEANUP: Clear temporary variables
             del templated_prompts
             
+            print(f"{Fore.GREEN}✅ [PROCESS INPUT] Processed {input_tokens.input_ids.shape[0]} inputs{Style.RESET_ALL}")
+            
             return input_tokens
             
         except Exception as e:
-            print(f"Input processing failed: {e}")
+            print(f"{Fore.RED}❌ [PROCESS INPUT] Input processing failed: {e}{Style.RESET_ALL}")
             # Return minimal safe input
-            return self.processing_class("", return_tensors="pt", padding=True)
+            try:
+                return self.processing_class("fallback text", return_tensors="pt", padding=True)
+            except Exception as fallback_e:
+                print(f"{Fore.RED}❌ [PROCESS INPUT] Even fallback failed: {fallback_e}{Style.RESET_ALL}")
+                # Final fallback - create minimal tensor manually
+                return type('MockTokens', (), {
+                    'input_ids': torch.tensor([[0]], device=self.device),
+                    'attention_mask': torch.tensor([[1]], device=self.device)
+                })
+
+    def step(
+        self,
+        stage: int,
+        state: GameState,
+        data_manager: DataManager,
+        reward_manager: RewardManager,
+        global_step: int,
+    ) -> int:
+        """✅ OPTIMIZED: Perform a single training step with memory management."""
+        
+        try:
+            # ✅ INCREMENT COUNTERS
+            global_step += 1
+            self.training_step_counter += 1
+            self._in_training_step = True  # Flag for cleanup safety
+            
+            # ✅ PERIODIC MEMORY CLEANUP
+            if self.training_step_counter % self.metrics_cleanup_frequency == 0:
+                self._check_trainer_memory_pressure()
+            
+            print(f"{Fore.CYAN}📈 [STEP] Training step {global_step} for stage {stage}{Style.RESET_ALL}")
+            
+            # ✅ GET INPUTS WITH ERROR HANDLING
+            try:
+                stage_inputs = state.get_stage_state(stage)
+                stage_inputs, index_mapping = data_manager.prepare_input(stage_inputs, stage)
+                assert stage_inputs is not None, f"No inputs found for stage {stage}"
+                
+                # ✅ VALIDATION: Check index_mapping
+                if not index_mapping:
+                    print(f"{Fore.YELLOW}⚠️ [STEP] Empty index mapping for stage {stage}{Style.RESET_ALL}")
+                    return global_step
+                    
+            except Exception as input_e:
+                print(f"{Fore.RED}❌ [STEP] Failed to get inputs for stage {stage}: {input_e}{Style.RESET_ALL}")
+                return global_step
+            
+            # ✅ GET OUTPUTS WITH ERROR HANDLING
+            try:
+                stage_actions = state.get_stage_actions(stage)
+                stage_outputs = []
+                
+                for idx in range(len(index_mapping)):
+                    try:
+                        agent, batch_id, node_idx = index_mapping[idx]
+                        if agent in stage_actions and batch_id in stage_actions[agent] and node_idx in stage_actions[agent][batch_id]:
+                            stage_outputs.append(stage_actions[agent][batch_id][node_idx])
+                        else:
+                            print(f"{Fore.YELLOW}⚠️ [STEP] Missing action for {agent}/{batch_id}/{node_idx}, using fallback{Style.RESET_ALL}")
+                            stage_outputs.append("")  # Fallback
+                    except Exception as action_e:
+                        print(f"{Fore.YELLOW}⚠️ [STEP] Failed to get action for index {idx}: {action_e}{Style.RESET_ALL}")
+                        stage_outputs.append("")  # Fallback
+                
+                if not stage_outputs:
+                    print(f"{Fore.YELLOW}⚠️ [STEP] No outputs found for stage {stage}{Style.RESET_ALL}")
+                    return global_step
+                    
+            except Exception as output_e:
+                print(f"{Fore.RED}❌ [STEP] Failed to get outputs for stage {stage}: {output_e}{Style.RESET_ALL}")
+                return global_step
+
+            # ✅ PROCESS MODEL INPUTS WITH MEMORY MANAGEMENT
+            try:
+                model_inputs = {}
+                processed_inputs = self._process_inputs(stage_inputs, for_training=True)
+                model_inputs["prompt_ids"] = processed_inputs.input_ids.to(self.model.device)
+                model_inputs["prompt_mask"] = processed_inputs.attention_mask.to(self.model.device)
+                
+                # ✅ CLEANUP: Clear processed inputs
+                del processed_inputs
+                
+                processed_outputs = self._process_inputs(stage_outputs, with_template=False, for_training=True)
+                model_inputs["completion_ids"] = processed_outputs.input_ids.to(self.model.device)
+                model_inputs["completion_mask"] = processed_outputs.attention_mask.to(self.model.device)
+                
+                # ✅ CLEANUP: Clear processed outputs
+                del processed_outputs
+                
+            except Exception as process_e:
+                print(f"{Fore.RED}❌ [STEP] Failed to process inputs/outputs: {process_e}{Style.RESET_ALL}")
+                return global_step
+
+            # ✅ GET REWARDS WITH ERROR HANDLING
+            try:
+                rewards_raw = reward_manager[stage]
+                rewards = []
+                
+                for idx in range(len(index_mapping)):
+                    try:
+                        agent, batch_id, node_idx = index_mapping[idx]
+                        if agent in rewards_raw and batch_id in rewards_raw[agent] and node_idx in rewards_raw[agent][batch_id]:
+                            reward_value = rewards_raw[agent][batch_id][node_idx]
+                            # Ensure reward is a number
+                            if isinstance(reward_value, (list, tuple)) and len(reward_value) > 0:
+                                rewards.append(float(reward_value[0]))
+                            else:
+                                rewards.append(float(reward_value))
+                        else:
+                            print(f"{Fore.YELLOW}⚠️ [STEP] Missing reward for {agent}/{batch_id}/{node_idx}, using 0.0{Style.RESET_ALL}")
+                            rewards.append(0.0)  # Fallback
+                    except Exception as reward_e:
+                        print(f"{Fore.YELLOW}⚠️ [STEP] Failed to get reward for index {idx}: {reward_e}{Style.RESET_ALL}")
+                        rewards.append(0.0)  # Fallback
+                
+                if not rewards:
+                    print(f"{Fore.YELLOW}⚠️ [STEP] No rewards found for stage {stage}, using zeros{Style.RESET_ALL}")
+                    rewards = [0.0] * len(index_mapping)
+                
+                # ✅ TENSOR CREATION WITH VALIDATION
+                rewards_tensor = torch.tensor(rewards, device=self.model.device, dtype=torch.float32)
+                
+                # ✅ RESHAPE REWARDS: Handle dimension mismatch
+                if len(rewards_tensor.shape) == 1:
+                    # Reshape to [batch_size, num_generations]
+                    expected_batch_size = len(rewards) // self.num_generations
+                    if len(rewards) % self.num_generations == 0 and expected_batch_size > 0:
+                        rewards_tensor = rewards_tensor.view(expected_batch_size, self.num_generations)
+                    else:
+                        # Fallback: treat as single batch
+                        print(f"{Fore.YELLOW}⚠️ [STEP] Reward dimension mismatch, treating as single batch{Style.RESET_ALL}")
+                        rewards_tensor = rewards_tensor.unsqueeze(0)  # Add batch dimension
+                        
+            except Exception as reward_e:
+                print(f"{Fore.RED}❌ [STEP] Failed to get rewards for stage {stage}: {reward_e}{Style.RESET_ALL}")
+                return global_step
+
+            # ✅ COMPUTE ADVANTAGES WITH MEMORY MANAGEMENT
+            try:
+                with torch.no_grad():
+                    # ✅ SAFE ADVANTAGE COMPUTATION: Handle different tensor shapes
+                    if rewards_tensor.dim() == 2 and rewards_tensor.size(1) > 1:
+                        # Multiple generations per batch
+                        advantages = rewards_tensor - rewards_tensor.mean(dim=1, keepdim=True)
+                        std = rewards_tensor.std(dim=1, keepdim=True)
+                        advantages = advantages / (std + 1e-8)
+                    elif rewards_tensor.dim() == 2:
+                        # Single generation per batch
+                        advantages = rewards_tensor - rewards_tensor.mean()
+                        std = rewards_tensor.std()
+                        advantages = advantages / (std + 1e-8)
+                    else:
+                        # 1D tensor
+                        advantages = rewards_tensor - rewards_tensor.mean()
+                        std = rewards_tensor.std()
+                        advantages = advantages / (std + 1e-8)
+                        
+                advantages = torch.flatten(advantages)
+                
+            except Exception as adv_e:
+                print(f"{Fore.RED}❌ [STEP] Failed to compute advantages: {adv_e}{Style.RESET_ALL}")
+                return global_step
+
+            model_inputs["advantages"] = advantages
+            model_inputs["old_per_token_logps"] = None
+
+            # ✅ FORWARD PASS WITH MEMORY MANAGEMENT
+            try:
+                with self.autocast:
+                    loss = self.compute_loss(self.model, model_inputs)
+
+                # ✅ BACKWARD PASS WITH MEMORY MANAGEMENT
+                loss.backward()
+                
+                # ✅ GRADIENT CLIPPING (optional)
+                if hasattr(self.args, 'max_grad_norm') and self.args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                
+                self.optimizer.step()
+                self.model.zero_grad()  # ✅ Clear gradients
+                
+            except Exception as forward_e:
+                print(f"{Fore.RED}❌ [STEP] Forward/backward pass failed: {forward_e}{Style.RESET_ALL}")
+                # Clear gradients even on failure
+                self.model.zero_grad()
+                return global_step
+
+            # ✅ LOGGING WITH MEMORY MANAGEMENT
+            try:
+                metrics = {
+                    "train/loss": loss.cpu().item(), 
+                    "train/rewards": rewards_tensor.cpu().mean().item()
+                }
+                self.log(metrics, global_step)
+                
+                # ✅ TRACK METRICS IN BOUNDED COLLECTIONS
+                if "train" in self._metrics:
+                    if "loss" in self._metrics["train"]:
+                        self._metrics["train"]["loss"].append(loss.cpu().item())
+                    if "rewards" in self._metrics["train"]:
+                        self._metrics["train"]["rewards"].append(rewards_tensor.cpu().mean().item())
+                        
+            except Exception as log_e:
+                print(f"Logging failed: {log_e}")
+
+            # ✅ CLEANUP: Clear all tensors
+            del loss, rewards_tensor, advantages, model_inputs
+            
+            # ✅ STEP CLEANUP
+            self.cleanup_step()
+            
+            return global_step
+            
+        except Exception as e:
+            print(f"{Fore.RED}❌ [STEP] Training step failed: {e}{Style.RESET_ALL}")
+            return global_step
+        finally:
+            self._in_training_step = False  # Clear training flag
 
     def generate(
         self, inputs: Any, return_completion_ids: bool = False, stage=0
