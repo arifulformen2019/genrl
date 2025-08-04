@@ -2,11 +2,11 @@ import contextlib
 import gc
 import os
 from collections import defaultdict
-from typing import Any, List
+from typing import Any, List, Union
 
 import torch
 import torch.utils.data
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, BitsAndBytesConfig
 from trl.data_utils import apply_chat_template
 from trl.models import create_reference_model
 from trl.trainer.grpo_config import GRPOConfig
@@ -17,14 +17,6 @@ from genrl.rewards import RewardManager
 from genrl.state import GameState
 from genrl.trainer import TrainerModule
 
-# OPTIMIZATION NOTE: For further CPU speedup, consider these steps outside this file:
-# 1. Install Intel® Extension for PyTorch: `pip install intel_extension_for_pytorch`
-#    Then, in your main script, wrap your model and optimizer:
-#    import intel_extension_for_pytorch as ipex
-#    model, optimizer = ipex.optimize(model, optimizer)
-# 2. Set environment variables for parallelism before running your script:
-#    export OMP_NUM_THREADS=<number_of_your_cpu_cores>
-
 
 class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
     """
@@ -32,19 +24,29 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
     Implements the TrainerModule interface defined in base_trainer.py.
     """
 
-    def __init__(self, models: List[Any], **kwargs):
+    def __init__(self, models: List[Union[str, Any]], **kwargs):
         """
         Initialize the GRPO trainer module.
 
         Args:
-            models: List containing the model to be trained.
+            models: List containing the model name (string) or model object to be trained.
             **kwargs: Additional arguments for configuration.
         """
         # Extract model and reward functions
         if not models or len(models) < 1:
             raise ValueError("At least one model must be provided")
 
-        self.model = models[0]
+        model_input = models[0]
+        
+        # ✅ SMART LOADING: Handle both strings and model objects
+        if isinstance(model_input, str):
+            print(f"Loading model from string: {model_input}")
+            self.model = self._smart_load_model(model_input)
+            self._model_name = model_input
+        else:
+            # Assume it's already a model object
+            self.model = model_input
+            self._model_name = getattr(self.model.config, '_name_or_path', 'unknown')
 
         # Configuration parameters
         config = kwargs.get("config", None)
@@ -100,6 +102,153 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         self._initialize_generation_config()
         self.init_tracker(self.save_dir, log_with=kwargs.get("log_with", None))
 
+    def _smart_load_model(self, model_name: str):
+        """
+        Smart model loading with automatic 4-bit quantization detection
+        
+        Args:
+            model_name: HuggingFace model name
+            
+        Returns:
+            Loaded model with optimal configuration
+        """
+        print(f"🚀 Smart loading model: {model_name}")
+        
+        # Get available GPU memory
+        available_memory_gb = self._get_available_gpu_memory()
+        
+        # Estimate model size from name
+        model_size_b = self._estimate_model_size(model_name)
+        
+        print(f"📊 Available GPU memory: {available_memory_gb:.1f}GB")
+        print(f"📊 Estimated model size: {model_size_b:.1f}B parameters")
+        
+        # Determine best loading strategy
+        should_use_4bit = self._should_use_4bit(available_memory_gb, model_size_b)
+        
+        if should_use_4bit:
+            return self._load_4bit_model(model_name)
+        else:
+            return self._load_standard_model(model_name)
+    
+    def _get_available_gpu_memory(self) -> float:
+        """Get available GPU memory in GB"""
+        if not torch.cuda.is_available():
+            return 0.0
+        
+        try:
+            torch.cuda.empty_cache()
+            device = torch.cuda.current_device()
+            total_memory = torch.cuda.get_device_properties(device).total_memory
+            allocated_memory = torch.cuda.memory_allocated(device)
+            
+            available_memory = total_memory - allocated_memory
+            available_gb = available_memory / (1024**3)
+            
+            return max(available_gb, 1.0)  # At least 1GB
+            
+        except Exception as e:
+            print(f"⚠️ Error checking GPU memory: {e}")
+            return 4.0  # Safe default
+    
+    def _estimate_model_size(self, model_name: str) -> float:
+        """Estimate model size in billions of parameters from name"""
+        model_name_lower = model_name.lower()
+        
+        if "0.5b" in model_name_lower or "500m" in model_name_lower:
+            return 0.5
+        elif "0.6b" in model_name_lower or "600m" in model_name_lower:
+            return 0.6
+        elif "1.5b" in model_name_lower or "1500m" in model_name_lower:
+            return 1.5
+        elif "1.7b" in model_name_lower or "1700m" in model_name_lower:
+            return 1.7
+        elif "3b" in model_name_lower:
+            return 3.0
+        elif "7b" in model_name_lower:
+            return 7.0
+        else:
+            return 1.5  # Default assumption
+    
+    def _should_use_4bit(self, available_memory_gb: float, model_size_b: float) -> bool:
+        """Determine if 4-bit quantization should be used"""
+        # Rough memory estimates with training overhead (3x multiplier):
+        # - FP32: 4 bytes per param * 3 (training overhead)
+        # - 4-bit: 0.5 bytes per param * 3 (training overhead)
+        
+        estimated_4bit_gb = (model_size_b * 0.5 * 3) / 1000  # Convert MB to GB
+        estimated_fp32_gb = (model_size_b * 4 * 3) / 1000
+        
+        print(f"📊 Estimated memory needed:")
+        print(f"   - 4-bit: {estimated_4bit_gb:.1f}GB")
+        print(f"   - FP32:  {estimated_fp32_gb:.1f}GB")
+        
+        # Use 4-bit if:
+        # 1. Available memory is less than FP32 requirement + 2GB buffer
+        # 2. OR model is large (>1B params) and memory is limited
+        
+        if available_memory_gb < (estimated_fp32_gb + 2.0):
+            print("✅ Using 4-bit: Memory constrained")
+            return True
+        elif model_size_b > 1.0 and available_memory_gb < 8.0:
+            print("✅ Using 4-bit: Large model + limited memory")
+            return True
+        else:
+            print("✅ Using FP32: Sufficient memory available")
+            return False
+    
+    def _load_4bit_model(self, model_name: str):
+        """Load model with 4-bit quantization"""
+        print("🔥 Loading with 4-bit quantization...")
+        
+        try:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=quantization_config,
+                device_map="auto",
+                torch_dtype="auto",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+            
+            # Check actual memory usage
+            if torch.cuda.is_available():
+                memory_used = torch.cuda.memory_allocated() / (1024**3)
+                print(f"✅ 4-bit model loaded successfully! GPU memory: {memory_used:.1f}GB")
+            
+            return model
+            
+        except Exception as e:
+            print(f"⚠️ 4-bit loading failed: {e}")
+            print("🔄 Falling back to standard loading...")
+            return self._load_standard_model(model_name)
+    
+    def _load_standard_model(self, model_name: str):
+        """Load model with standard precision"""
+        print("⚡ Loading with standard precision...")
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto",
+            torch_dtype="auto",
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+        
+        # Check actual memory usage
+        if torch.cuda.is_available():
+            memory_used = torch.cuda.memory_allocated() / (1024**3)
+            print(f"✅ Standard model loaded successfully! GPU memory: {memory_used:.1f}GB")
+        
+        return model
+
     def _initialize_model(self, enable_gradient_checkpointing):
         """Initialize the model and reference model."""
         self.model = self.model.to(self.device)
@@ -116,8 +265,16 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
     def _initialize_tokenizers(self):
         """Initialize tokenizers for the model and reward models."""
         if self.processing_class is None:
+            # Use the stored model name for tokenizer
+            model_name = getattr(self, '_model_name', None)
+            if model_name is None:
+                model_name = getattr(self.model.config, '_name_or_path', None)
+            
+            if model_name is None:
+                raise ValueError("Cannot determine model name for tokenizer initialization")
+            
             self.processing_class = AutoTokenizer.from_pretrained(
-                self.model.config._name_or_path, padding_side="left"
+                model_name, padding_side="left"
             )
 
     def _initialize_metrics(self):
@@ -142,6 +299,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             repetition_penalty=self.args.repetition_penalty,
         )
 
+    # Rest of the methods remain unchanged...
     def _process_inputs(self, inputs, with_template=True, for_training=False):
         if hasattr(inputs, "to_dict"):
             inputs = [dict(inputs[i]) for i in range(len(inputs))]
@@ -175,19 +333,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
     def generate(
         self, inputs: Any, return_completion_ids: bool = False, stage=0
     ) -> Any:
-        """
-        OPTIMIZATION: Rewritten to use a single, efficient batch generation call.
-        
-        Generate outputs from the model for the given inputs.
-
-        Args:
-            inputs: Input data for generation
-            return_completion_ids: Whether to return completion IDs along with text
-            stage: Current stage (0, 1, or 2) for proper output formatting
-
-        Returns:
-            Generated outputs in the format expected by the next stage
-        """
+        """Generate outputs from the model for the given inputs."""
         input_tokens = self._process_inputs(inputs)
         prompt_length = input_tokens.input_ids.size(1)
 
@@ -445,11 +591,6 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             # Note: torch.mps.empty_cache() is available in newer PyTorch versions
             if hasattr(torch.mps, "empty_cache"):
                 torch.mps.empty_cache()
-        
-        # OPTIMIZATION: Frequent garbage collection can severely harm performance by
-        # pausing execution. It's better to remove it and let Python's automatic
-        # GC handle memory management.
-        # gc.collect()
 
     def cleanup(self):
         """Clean up resources at the end of training."""
